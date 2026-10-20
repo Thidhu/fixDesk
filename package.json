@@ -1,0 +1,12 @@
+{
+  "name": "fixdesk",
+  "version": "1.0.0",
+  "description": "Self-hosted remote support: WebRTC screen sharing + optional control agent",
+  "scripts": { "start": "node server.js", "agent": "node agent.js" },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "express": "^4.19.2",
+    "ws": "^8.18.0",
+    "@nut-tree-fork/nut-js": "^4.2.0"
+  }
+}

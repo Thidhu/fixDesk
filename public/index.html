@@ -1,0 +1,116 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FixDesk</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font:16px system-ui,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#1e293b;border-radius:14px;padding:28px;width:min(440px,92vw);text-align:center}
+h1{margin:0 0 4px}p{color:#94a3b8;margin:6px 0 18px}
+button{background:#3b82f6;color:#fff;border:0;border-radius:8px;padding:12px 18px;font-size:16px;cursor:pointer;margin:4px}
+button.alt{background:#334155}button.red{background:#dc2626}button.green{background:#16a34a}
+input{width:100%;padding:12px;border-radius:8px;border:1px solid #475569;background:#0f172a;color:#fff;font-size:20px;text-align:center;letter-spacing:3px;margin-bottom:10px}
+.code{font-size:38px;letter-spacing:6px;font-weight:700;margin:10px 0;color:#38bdf8}
+.hide{display:none!important}.req{background:#0f172a;border-radius:10px;padding:12px;margin:10px 0}
+#stage{position:fixed;inset:0;background:#000;display:flex;flex-direction:column}
+#bar{padding:8px 12px;background:#1e293b;display:flex;gap:10px;align-items:center;font-size:14px}
+#vid{flex:1;min-height:0;width:100%;object-fit:contain;background:#000;outline:none}
+code{background:#0f172a;padding:2px 6px;border-radius:4px;font-size:13px}
+</style></head><body>
+<div class="card" id="home"><h1>FixDesk</h1><p>Remote support from your browser</p>
+<button id="bHost">Share my screen</button><button class="alt" id="bJoin">Connect to a computer</button></div>
+
+<div class="card hide" id="host"><h1>Your screen is shared</h1><p>Give this code to your technician:</p>
+<div class="code" id="code">…</div>
+<p id="agentState">Remote control: <b>not enabled</b></p>
+<div id="agentHelp" class="req" style="text-align:left;font-size:14px"><b>Let your technician use the mouse and keyboard</b>
+<ol style="padding-left:20px;margin:8px 0"><li>Download: <a href="/download/agent.zip" style="color:#38bdf8">FixDesk-Helper.zip</a></li>
+<li>Unzip it, then open <code>start.bat</code> (Windows) or <code>start.command</code> (Mac)</li><li>When asked, type the code shown above</li></ol>
+<span style="color:#94a3b8">Needs Node.js (nodejs.org). First time on Mac: right-click the file, then Open.</span></div>
+<div id="reqs"></div><button class="red" id="bStop">Stop sharing</button></div>
+
+<div class="card hide" id="join"><h1>Connect</h1><p>Enter the 9-digit code from the other computer</p>
+<input id="jcode" inputmode="numeric" maxlength="11" placeholder="000 000 000"><button id="bGo">Connect</button><p id="jmsg"></p></div>
+
+<div id="stage" class="hide"><div id="bar"><span id="mode"></span><input id="txt" placeholder="Type or paste text here, press Enter to send" style="flex:1;margin:0;padding:6px 10px;font-size:14px;letter-spacing:0;text-align:left"><button id="bSend">Send text</button><button class="alt" id="bFull">Fullscreen</button><button class="red" id="bEnd">Disconnect</button></div>
+<video id="vid" autoplay playsinline muted tabindex="0"></video></div>
+
+<script>
+const $=id=>document.getElementById(id), show=id=>{['home','host','join','stage'].forEach(x=>$(x).classList.toggle('hide',x!==id))};
+const ICE={iceServers:[{urls:'stun:stun.l.google.com:19302'}]}; // add a TURN server here for strict networks
+const wsUrl=(location.protocol==='https:'?'wss://':'ws://')+location.host;
+$('bHost').onclick=startHost; $('bJoin').onclick=()=>show('join');
+
+/* ---------- HOST (computer being fixed) ---------- */
+async function startHost(){
+  let stream;
+  try{stream=await navigator.mediaDevices.getDisplayMedia({video:{cursor:'always'},audio:false});}
+  catch(e){return alert('Screen sharing needs HTTPS (or localhost) and your permission. Choose "Entire screen" for remote control.');}
+  const ws=new WebSocket(wsUrl), peers={}; show('host');
+  ws.onopen=()=>ws.send(JSON.stringify({t:'host'}));
+  stream.getVideoTracks()[0].onended=stop;
+  $('bStop').onclick=stop;
+  function stop(){window.fixdeskNative?.stopAgent();ws.close();Object.values(peers).forEach(p=>p.close());stream.getTracks().forEach(t=>t.stop());show('home');}
+  ws.onmessage=async ev=>{const m=JSON.parse(ev.data);
+    if(m.t==='code'){if(window.fixdeskNative){window.fixdeskNative.startAgent(m.code.replace(/\D/g,''));$('agentHelp').classList.add('hide');}$('code').textContent=m.code.replace(/(\d{3})(?=\d)/g,'$1 ');}
+    if(m.t==='agent'){$('agentState').innerHTML=m.on?'Remote control: <b style="color:#4ade80">helper connected</b>':'Remote control: <b>not enabled</b>';if(!window.fixdeskNative)$('agentHelp').classList.toggle('hide',m.on);}
+    if(m.t==='request'){
+      const d=document.createElement('div');d.className='req';d.id='r'+m.id;
+      d.innerHTML='<div>Someone wants to connect</div>';
+      [['View only','view','alt'],['Allow control','control','green'],['Deny','deny','red']].forEach(([l,mode,c])=>{
+        const b=document.createElement('button');b.textContent=l;b.className=c;b.onclick=async()=>{
+          ws.send(JSON.stringify({t:'decide',id:m.id,mode}));d.remove();if(mode!=='deny')await offer(m.id);};d.appendChild(b);});
+      $('reqs').appendChild(d);}
+    if(m.t==='sig'&&peers[m.from]){const p=peers[m.from],s=m.data;
+      if(s.sdp)await p.setRemoteDescription(s.sdp);else if(s.ice)await p.addIceCandidate(s.ice);}
+    if(m.t==='left'){peers[m.id]?.close();delete peers[m.id];$('r'+m.id)?.remove();}
+  };
+  async function offer(id){const p=new RTCPeerConnection(ICE);peers[id]=p;
+    stream.getTracks().forEach(t=>p.addTrack(t,stream));
+    p.onicecandidate=e=>e.candidate&&ws.send(JSON.stringify({t:'sig',to:id,data:{ice:e.candidate}}));
+    await p.setLocalDescription(await p.createOffer());
+    ws.send(JSON.stringify({t:'sig',to:id,data:{sdp:p.localDescription}}));}
+}
+
+/* ---------- VIEWER (technician) ---------- */
+$('bGo').onclick=()=>{
+  const code=$('jcode').value.replace(/\D/g,''); if(code.length!==9)return $('jmsg').textContent='Enter 9 digits';
+  const ws=new WebSocket(wsUrl),v=$('vid');let pc,wantCtl=false,agentOn=false;const canControl=()=>wantCtl&&agentOn;
+  const setMode=()=>$('mode').textContent=wantCtl?(agentOn?'Control ON: click screen, then type':'Agent not running on that PC'):'View only';
+  ws.onopen=()=>ws.send(JSON.stringify({t:'join',code}));
+  ws.onclose=()=>{if(!$('stage').classList.contains('hide')||$('jmsg').textContent==='Waiting for approval…'){end('Disconnected');}};
+  $('bEnd').onclick=()=>{ws.close();end('');};
+  function end(msg){pc?.close();v.srcObject=null;show('join');$('jmsg').textContent=msg;}
+  ws.onmessage=async ev=>{const m=JSON.parse(ev.data);
+    if(m.t==='error')$('jmsg').textContent=m.msg;
+    if(m.t==='waiting')$('jmsg').textContent='Waiting for approval…';
+    if(m.t==='ended')end('Session ended');
+    if(m.t==='decision'){if(m.mode==='deny'){ws.onclose=null;ws.close();return $('jmsg').textContent='Request denied';}
+      wantCtl=m.mode==='control';agentOn=m.agent;setMode();show('stage');v.focus();}
+    if(m.t==='agent'){agentOn=m.on;setMode();}
+    if(m.t==='sig'){const s=m.data;
+      if(s.sdp){pc=new RTCPeerConnection(ICE);
+        pc.ontrack=e=>{v.srcObject=e.streams[0];};
+        pc.onicecandidate=e=>e.candidate&&ws.send(JSON.stringify({t:'sig',data:{ice:e.candidate}}));
+        await pc.setRemoteDescription(s.sdp);await pc.setLocalDescription(await pc.createAnswer());
+        ws.send(JSON.stringify({t:'sig',data:{sdp:pc.localDescription}}));}
+      else if(s.ice&&pc)await pc.addIceCandidate(s.ice);}
+  };
+  const ctl=o=>canControl()&&ws.readyState===1&&ws.send(JSON.stringify({t:'ctl',...o}));
+  const pos=e=>{const r=v.getBoundingClientRect(),k=Math.min(r.width/v.videoWidth,r.height/v.videoHeight),w=v.videoWidth*k,h=v.videoHeight*k;
+    return{x:Math.min(1,Math.max(0,(e.clientX-r.left-(r.width-w)/2)/w)),y:Math.min(1,Math.max(0,(e.clientY-r.top-(r.height-h)/2)/h))};};
+  let last=0;
+  v.onmousemove=e=>{const n=performance.now();if(n-last>30){last=n;ctl({k:'move',...pos(e)});}};
+  v.onmousedown=e=>{v.focus();ctl({k:'down',b:e.button,...pos(e)});e.preventDefault();};
+  v.onmouseup=e=>ctl({k:'up',b:e.button,...pos(e)});
+  v.oncontextmenu=e=>e.preventDefault();
+  v.onwheel=e=>{ctl({k:'wheel',dy:e.deltaY});e.preventDefault();};
+  const held=new Set(),mods=['Shift','Control','Alt','Meta'];
+  const kd=(e,down)=>{if($('stage').classList.contains('hide')||document.activeElement===$('txt')||!canControl())return;
+    if(mods.includes(e.key))down?held.add(e.key):held.delete(e.key);
+    ctl({k:'key',key:e.key,down});e.preventDefault();};
+  document.onkeydown=e=>kd(e,true);document.onkeyup=e=>kd(e,false);
+  window.onblur=()=>{held.forEach(k=>ctl({k:'key',key:k,down:false}));held.clear();};
+  const sendTxt=()=>{const t=$('txt').value;if(t){ctl({k:'text',text:t});$('txt').value='';}};
+  $('txt').onkeydown=e=>{if(e.key==='Enter'){sendTxt();e.preventDefault();}};
+  $('bSend').onclick=sendTxt;
+};
+$('bFull').onclick=()=>$('stage').requestFullscreen?.();
+</script></body></html>
